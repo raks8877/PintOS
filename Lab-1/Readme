@@ -1,0 +1,7 @@
+Changes:
+In the diff file change "/home/raks/Pintos" to point to the location 
+where your pintos directory is.
+
+
+from where to apply the patch:
+go inside the pintos/src folder then apply the patch
