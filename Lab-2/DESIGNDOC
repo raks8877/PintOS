@@ -1,0 +1,351 @@
+         +--------------------------+
+         |         E0-253           |
+         | PROJECT 2: USER PROGRAMS |
+         |      DESIGN DOCUMENT     |
+         +--------------------------+
+
+---- GROUP ----
+
+>> Fill in your name and email address
+
+Rakesh Beck <rakeshbeck@iisc.ac.in>
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+Used this to reverse string. Later realized it was not need because
+order of args didn't matter, how their address is put in the stack
+matters.
+https://www.geeksforgeeks.org/reverse-words-in-a-given-string/
+
+Took ideas from this to implement wait system call synchronization.
+https://github.com/arpith20/Arpith_PintOS
+
+         ARGUMENT PASSING
+         ================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+    No additional declaration was need for this.
+    
+---- ALGORITHMS ----
+
+>> A2: Briefly describe how you implemented argument parsing.  How do
+>> you arrange for the elements of argv[] to be in the right order?
+>> How do you avoid overflowing the stack page?
+
+    String is reversed before adding it into the stack so this makes
+    inserting arguments in right order easy.
+    
+    Currently not checking for overflow in stack page.
+
+---- RATIONALE ----
+
+>> A3: Why does Pintos implement strtok_r() but not strtok()?
+
+    Difference between strtok_r() and strtok() is that strtok_r()
+    is reentrant version of strtok() i.e "there is a provision to 
+    interrupt the function in the course of execution, service the 
+    interrupt service routine and then resume the earlier going on 
+    function, without hampering its earlier course of action"
+
+>> A4: In Pintos, the kernel separates commands into a executable name
+>> and arguments.  In Unix-like systems, the shell does this
+>> separation.  Identify at least two advantages of the Unix approach.
+    
+    1) Reduce the complexity of kernel.
+    2) Checking executable is present or not, parsing argument length
+       and any other checking are trivial task. 
+
+           SYSTEM CALLS
+           ============
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+    
+    In thread.h -> struct thread
+
+        1) struct list file_list;
+            Used to hold list of all files used by this thread.
+
+        2) struct list child_list;
+            Used to hold list of all child thread spawned by
+            this thread.
+        
+        3) struct child_struct *ptr_to_child_list_struct;
+            Parent thread has a list of all its children and their
+            corresponding metadata. Child thread needs to have a pointer
+            to its own metadata located in parent's child list so that
+            child thread can update its status and can synchronization
+            with parent.
+
+        struct file *file_currently_using;
+            Used to disallow other threads to use this file if current
+            thread is using it.
+
+    In thread.h
+        This structure is used to store file related metadata.
+        fd       : It is used to store file descriptor.
+        file     : It is used to store file object to perform
+                   file operations.
+        fileelem : List elements for thread's file_list.
+        struct file_struct
+        {
+          int fd;
+          struct file *file;
+          struct list_elem fileelem;
+        };
+
+        This structure is used to store child spawn metadata.
+        tid       : It stores child thread's identifier.
+        status    : It stores child thread's exit status.
+        sema_load : It is used for synchronization
+        sema_wait : It is used for synchronization
+        is_init   : It is used to check if current structure is
+                    initialized or not.
+        childelem : List elements for thread's child_list
+        struct child_struct
+        {
+          tid_t tid;
+          int status;
+          struct semaphore sema_load;
+          struct semaphore sema_wait;
+          bool is_init;
+          struct list_elem childelem;
+        };
+
+    
+    In syscall.h
+        Used for synchronization so that only one process/thread can use file at a time.
+        struct lock file_lock;
+
+        For allocating fd
+        static int allocate_fd = 2;
+    
+
+    In process.c
+        Used for synchronization so that only one process/thread can use file at a time.
+        struct load_lock
+        {
+          struct lock *proc_lock;
+          bool is_init;
+        }p_load_lock;
+    
+>> B2: Describe how file descriptors are associated with open files.
+>> Are file descriptors unique within the entire OS or just within a
+>> single process?
+
+    file_struct stores both file and its corresponding file descriptor.
+    file descriptors are unique within entire OS because static global
+    variable is used, which is incremented after every allocation.
+
+
+---- ALGORITHMS ----
+
+>> B3: Describe your code for reading and writing user data from the
+>> kernel.
+
+    I am using the first method described in the documentation i.e
+    "to verify the validity of a user-provided pointer, then dereference 
+    it"
+
+    First, 
+    check if all arguments is valid user address or not. If there
+    is a buffer and size in arguments then additionally check
+    buffer + size is within valid user address.
+    If not then exit with status -1.
+
+    Second,
+    check fd to determine to/from where data need to be read/written to.
+    if fd == 0 it means STDIN then read from input buffer.
+    if fd == 1 it means STDOUT then write to console.
+    else
+    There is a read/write operation to file with current fd.
+    For this we need to acquire lock for synchronization
+    and then perform the operation. 
+    After performing the operation release the lock.
+
+
+>> B4: Suppose a system call causes a full page (4,096 bytes) of data
+>> to be copied from user space into the kernel.  What is the least
+>> and the greatest possible number of inspections of the page table
+>> (e.g. calls to pagedir_get_page()) that might result?  What about
+>> for a system call that only copies 2 bytes of data?  Is there room
+>> for improvement in these numbers, and how much?
+
+    For full page:
+        Least #inspections is 1. when we get the page, we can just check
+        its starting address to ensure starting address won't lie between
+        PHY_BAS - 4k.
+
+        Greatest #inspection is 2 (assuming) we have a continuous page. we can just
+        check starting address and ending address.
+
+    For 2 bytes of data:
+        Least #inspections is 1 reason same as above.
+
+        Greatest #inspection is 2 reason same as above.
+
+>> B5: Briefly describe your implementation of the "wait" system call
+>> and how it interacts with process termination.
+
+    First,
+    Check if there are child thread in current thread's child list.
+    If not then it means that there is no child thread to wait for so
+    return -1;
+
+    Second,
+    Iterate current thread's child list and find corresponding child_struct
+    data. Remove the given child tid from the list so that again wait 
+    with that child thread's tid will give error.
+
+    There semaphore (sema_wait) is initialized with 0 so sema down will 
+    cause it to wait.
+
+    Third,
+    When child thread will exit it will perform sema up after updating
+    its status in its child_struct so parent thread
+    who was waiting will be executed and will get child thread's 
+    status properly without race condition.
+
+
+
+>> B6: Any access to user program memory at a user-specified address
+>> can fail due to a bad pointer value.  Such accesses must cause the
+>> process to be terminated.  System calls are fraught with such
+>> accesses, e.g. a "write" system call requires reading the system
+>> call number from the user stack, then each of the call's three
+>> arguments, then an arbitrary amount of user memory, and any of
+>> these can fail at any point.  This poses a design and
+>> error-handling problem: how do you best avoid obscuring the primary
+>> function of code in a morass of error-handling?  Furthermore, when
+>> an error is detected, how do you ensure that all temporarily
+>> allocated resources (locks, buffers, etc.) are freed?  In a few
+>> paragraphs, describe the strategy or strategies you adopted for
+>> managing these issues.  Give an example.
+    
+    Whenever user-specified address fail, page fault handler is invoked.
+    Page fault handler check that was user trying to access kernel address
+    or user provided a bad/null pointer then it will call exit system call
+    with value -1;
+
+    In exit system call if faulting thread has acquired lock then it will 
+    release the lock and close/free all the files used by that thread.
+
+
+---- SYNCHRONIZATION ----
+
+>> B7: The "exec" system call returns -1 if loading the new executable
+>> fails, so it cannot return before the new executable has completed
+>> loading.  How does your code ensure this?  How is the load
+>> success/failure status passed back to the thread that calls "exec"?
+
+    I am using another semaphore for this named sema_load which is
+    initialized with 0.
+    After creating a new thread, parent thread will call sema down
+    and it will get blocked
+
+    Child thread after load successfully/unsuccessfully will call sema up
+    after updating its status value in its child_struct data.
+
+    Now Parent thread will get back child thread's status.
+
+>> B8: Consider parent process P with child process C.  How do you
+>> ensure proper synchronization and avoid race conditions when P
+>> calls wait(C) before C exits?  After C exits?  How do you ensure
+>> that all resources are freed in each case?  How about when P
+>> terminates without waiting, before C exits?  After C exits?  Are
+>> there any special cases?
+
+    P calls wait(C) before C exits:
+        sema_load takes care for this case as explained in B7.
+
+    P calls wait(C) after C exits:
+        sema_wait takes care of this case as explained in B5.
+
+    Whenever thread will exit it will release all its acquired resources.
+    Since child_struct is in parent's child list so even if child thread
+    will exit first, it will update its corresponding child_struct.
+    If parent thread will exit first then there is no need for to return
+    child thread's status.
+    [I am not freeing child list during exit now, even if this is implemented
+     it won't have any negative effect]
+
+        
+---- RATIONALE ----
+
+>> B9: Why did you choose to implement access to user memory from the
+>> kernel in the way that you did?
+    
+    I chose the first method as mentioned in the documentation because 
+    of its simplicity.
+
+>> B10: What advantages or disadvantages can you see to your design
+>> for file descriptors?
+    
+    Advantage:
+    Creating a list of file_struct with fd and file data is easy
+    for locating file with its corresponding fd.
+
+    Disadvantage:
+    To locate file for that corresponding fd requires list iteration.
+    Since fd are unique for the entire system, map can be used to 
+    locate file for the corresponding fd.
+
+
+>> B11: The default tid_t to pid_t mapping is the identity mapping.
+>> If you changed it, what advantages are there to your approach?
+
+    tid_t to pid_t mapping is not changed.
+
+         SURVEY QUESTIONS
+         ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+>> Any other comments?
+    
+    Documentation provided with pintos is completely out-dated!
+    Kindly get the feedback from students what need to be changed,
+    so that other won't have to debug about why its not working.
+    Or if a VM can be provided with base setup done will be easy
+    then to just focus on assignment.
+    for example, "the first argument is in the 32-bit word at the next 
+    higher address, and so on". This was not working as the document says
+    due to compiler version change.
+
+    In lib/user/syscall.c:
+    "g" has to be replaced by "r" to get the first argument at the next
+    higher address.
+
+

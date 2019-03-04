@@ -1,0 +1,919 @@
+diff -uprb Downloads/pintos/src/devices/shutdown.c pintos-assign/src/devices/shutdown.c
+--- Downloads/pintos/src/devices/shutdown.c	2012-09-27 06:08:29.000000000 +0530
++++ pintos-assign/src/devices/shutdown.c	2019-02-15 21:43:58.860000000 +0530
+@@ -99,6 +99,14 @@ shutdown_power_off (void)
+   printf ("Powering off...\n");
+   serial_flush ();
+ 
++  /* ACPI Shutdown sequence supported by Bochs and QEMU
++     http://forum.osdev.org/viewtopic.php?t=16990 */
++  outw( 0x604, 0x0 | 0x2000 );
++
++  /* Newer QEMU doesn't support old power-off sequence. Use ACPI
++     shutdown. */
++  outw (0xB004, 0x2000);
++
+   /* This is a special power-off sequence supported by Bochs and
+      QEMU, but not by physical hardware. */
+   for (p = s; *p != '\0'; p++)
+diff -uprb Downloads/pintos/src/lib/user/syscall.c pintos-assign/src/lib/user/syscall.c
+--- Downloads/pintos/src/lib/user/syscall.c	2012-09-27 06:08:30.000000000 +0530
++++ pintos-assign/src/lib/user/syscall.c	2019-02-19 14:38:04.224000000 +0530
+@@ -23,7 +23,7 @@
+             ("pushl %[arg0]; pushl %[number]; int $0x30; addl $8, %%esp" \
+                : "=a" (retval)                                           \
+                : [number] "i" (NUMBER),                                  \
+-                 [arg0] "g" (ARG0)                                       \
++                 [arg0] "r" (ARG0)                                       \
+                : "memory");                                              \
+           retval;                                                        \
+         })
+@@ -38,8 +38,8 @@
+              "pushl %[number]; int $0x30; addl $12, %%esp"      \
+                : "=a" (retval)                                  \
+                : [number] "i" (NUMBER),                         \
+-                 [arg0] "g" (ARG0),                             \
+-                 [arg1] "g" (ARG1)                              \
++                 [arg0] "r" (ARG0),                             \
++                 [arg1] "r" (ARG1)                              \
+                : "memory");                                     \
+           retval;                                               \
+         })
+@@ -54,9 +54,9 @@
+              "pushl %[number]; int $0x30; addl $16, %%esp"      \
+                : "=a" (retval)                                  \
+                : [number] "i" (NUMBER),                         \
+-                 [arg0] "g" (ARG0),                             \
+-                 [arg1] "g" (ARG1),                             \
+-                 [arg2] "g" (ARG2)                              \
++                 [arg0] "r" (ARG0),                             \
++                 [arg1] "r" (ARG1),                             \
++                 [arg2] "r" (ARG2)                              \
+                : "memory");                                     \
+           retval;                                               \
+         })
+diff -uprb Downloads/pintos/src/threads/thread.c pintos-assign/src/threads/thread.c
+--- Downloads/pintos/src/threads/thread.c	2012-09-27 06:08:38.000000000 +0530
++++ pintos-assign/src/threads/thread.c	2019-02-27 22:08:00.480000000 +0530
+@@ -147,6 +147,19 @@ thread_print_stats (void)
+           idle_ticks, kernel_ticks, user_ticks);
+ }
+ 
++static  bool
++is_interior (struct list_elem *elem)
++{
++  return elem != NULL && elem->prev != NULL && elem->next != NULL;
++}
++
++/* Returns true if ELEM is a tail, false otherwise. */
++static  bool
++is_tail (struct list_elem *elem)
++{
++  return elem != NULL && elem->prev != NULL && elem->next == NULL;
++}
++
+ /* Creates a new kernel thread named NAME with the given initial
+    PRIORITY, which executes FUNCTION passing AUX as the argument,
+    and adds it to the ready queue.  Returns the thread identifier
+@@ -209,6 +222,15 @@ thread_create (const char *name, int pri
+   /* Add to run queue. */
+   thread_unblock (t);
+ 
++  // add_child_to_parent (tid);
++  struct thread *cur = thread_current ();
++  struct child_struct *child_o = (struct child_struct *) malloc (sizeof (struct child_struct));
++  child_o->tid = tid;
++  child_o->status = INT32_MIN;
++  child_o->is_init = false;
++  list_push_back (&cur->child_list, &child_o->childelem);
++  t->ptr_to_child_list_struct = child_o; 
++  
+   return tid;
+ }
+ 
+@@ -248,6 +270,7 @@ thread_unblock (struct thread *t)
+   list_push_back (&ready_list, &t->elem);
+   t->status = THREAD_READY;
+   intr_set_level (old_level);
++  
+ }
+ 
+ /* Returns the name of the running thread. */
+@@ -470,6 +493,11 @@ init_thread (struct thread *t, const cha
+   t->priority = priority;
+   t->magic = THREAD_MAGIC;
+   list_push_back (&all_list, &t->allelem);
++  
++  list_init (&t->child_list);
++  list_init (&t->file_list);
++  t->ptr_to_child_list_struct = NULL;
++  t->file_currently_using = NULL;
+ }
+ 
+ /* Allocates a SIZE-byte frame at the top of thread T's stack and
+diff -uprb Downloads/pintos/src/threads/thread.h pintos-assign/src/threads/thread.h
+--- Downloads/pintos/src/threads/thread.h	2012-09-27 06:08:38.000000000 +0530
++++ pintos-assign/src/threads/thread.h	2019-02-28 21:29:07.032000000 +0530
+@@ -4,6 +4,7 @@
+ #include <debug.h>
+ #include <list.h>
+ #include <stdint.h>
++#include "threads/synch.h"
+ 
+ /* States in a thread's life cycle. */
+ enum thread_status
+@@ -80,6 +81,21 @@ typedef int tid_t;
+    only because they are mutually exclusive: only a thread in the
+    ready state is on the run queue, whereas only a thread in the
+    blocked state is on a semaphore wait list. */
++struct file_struct
++{
++  int fd;
++  struct file *file;
++  struct list_elem fileelem;
++};
++struct child_struct
++{
++  tid_t tid;
++  int status;
++  struct semaphore sema_load;
++  struct semaphore sema_wait;
++  bool is_init;
++  struct list_elem childelem;
++};
+ struct thread
+   {
+     /* Owned by thread.c. */
+@@ -93,6 +109,10 @@ struct thread
+     /* Shared between thread.c and synch.c. */
+     struct list_elem elem;              /* List element. */
+ 
++    struct list file_list;
++    struct list child_list;
++    struct child_struct *ptr_to_child_list_struct;
++    struct file *file_currently_using;
+ #ifdef USERPROG
+     /* Owned by userprog/process.c. */
+     uint32_t *pagedir;                  /* Page directory. */
+Only in pintos-assign/src/userprog: bochsrc.txt
+diff -uprb Downloads/pintos/src/userprog/exception.c pintos-assign/src/userprog/exception.c
+--- Downloads/pintos/src/userprog/exception.c	2012-09-27 06:08:38.000000000 +0530
++++ pintos-assign/src/userprog/exception.c	2019-02-27 12:17:47.608000000 +0530
+@@ -4,6 +4,7 @@
+ #include "userprog/gdt.h"
+ #include "threads/interrupt.h"
+ #include "threads/thread.h"
++#include "threads/vaddr.h"
+ 
+ /* Number of page faults processed. */
+ static long long page_fault_cnt;
+@@ -148,6 +149,9 @@ page_fault (struct intr_frame *f)
+   write = (f->error_code & PF_W) != 0;
+   user = (f->error_code & PF_U) != 0;
+ 
++  if ((is_kernel_vaddr (fault_addr) && user) || not_present)
++   exit (-1);
++
+   /* To implement virtual memory, delete the rest of the function
+      body, and replace it with code that brings in the page to
+      which fault_addr refers. */
+Only in pintos-assign/src/userprog: input
+diff -uprb Downloads/pintos/src/userprog/process.c pintos-assign/src/userprog/process.c
+--- Downloads/pintos/src/userprog/process.c	2012-09-27 06:08:38.000000000 +0530
++++ pintos-assign/src/userprog/process.c	2019-03-01 13:42:43.504000000 +0530
+@@ -17,9 +17,16 @@
+ #include "threads/palloc.h"
+ #include "threads/thread.h"
+ #include "threads/vaddr.h"
++#include "threads/synch.h"
++// #include "userprog/syscall.h"
+ 
+ static thread_func start_process NO_RETURN;
+ static bool load (const char *cmdline, void (**eip) (void), void **esp);
++struct load_lock
++{
++  struct lock *proc_lock;
++  bool is_init;
++}p_load_lock;
+ 
+ /* Starts a new thread running a user program loaded from
+    FILENAME.  The new thread may be scheduled (and may even exit)
+@@ -28,6 +35,12 @@ static bool load (const char *cmdline, v
+ tid_t
+ process_execute (const char *file_name) 
+ {
++  if (!p_load_lock.is_init)
++  {
++    p_load_lock.is_init = true;
++    lock_init (&p_load_lock.proc_lock);
++  }
++  
+   char *fn_copy;
+   tid_t tid;
+ 
+@@ -38,10 +51,48 @@ process_execute (const char *file_name)
+     return TID_ERROR;
+   strlcpy (fn_copy, file_name, PGSIZE);
+ 
++  char *exec_name, *token, *save_ptr;
++  exec_name = (char *) malloc (strlen (fn_copy) + 1);
++  memcpy (exec_name, fn_copy, strlen(fn_copy) + 1);
++  token = strtok_r (exec_name, " ", &save_ptr);
++  
+   /* Create a new thread to execute FILE_NAME. */
+-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
++  tid = thread_create (token, PRI_DEFAULT, start_process, fn_copy);
+   if (tid == TID_ERROR)
+     palloc_free_page (fn_copy); 
++  
++  struct thread *cur = thread_current ();
++  
++  if (!list_empty(&cur->child_list))
++  {
++    struct list_elem *e;
++    struct child_struct *child_o = NULL;
++    for (e = list_begin (&cur->child_list); e != list_end (&cur->child_list); 
++        e = list_next (e))
++    {
++      child_o = list_entry (e, struct child_struct, childelem);
++      if (child_o->tid == tid)
++      {
++        break;
++      }
++    }
++    if (child_o == NULL)
++    {
++      exit (-1);
++    }
++    
++    if (!child_o->is_init)
++    {
++      sema_init (&child_o->sema_load, 0);
++      sema_init (&child_o->sema_wait, 0);
++      child_o->is_init = true;
++    }
++    
++    sema_down (&child_o->sema_load);
++    if (child_o->status == INT32_MAX)
++      return -1;
++    
++  }
+   return tid;
+ }
+ 
+@@ -59,12 +110,30 @@ start_process (void *file_name_)
+   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+   if_.cs = SEL_UCSEG;
+   if_.eflags = FLAG_IF | FLAG_MBS;
++  
++  lock_acquire (&p_load_lock.proc_lock);
+   success = load (file_name, &if_.eip, &if_.esp);
++  lock_release (&p_load_lock.proc_lock);
+ 
++  struct thread *cur = thread_current ();
+   /* If load failed, quit. */
+   palloc_free_page (file_name);
+   if (!success) 
++  {
++    if (cur->ptr_to_child_list_struct != NULL)
++    {
++      cur->ptr_to_child_list_struct->status = INT32_MAX;  
++      sema_up (&cur->ptr_to_child_list_struct->sema_load);
++    }
+     thread_exit ();
++  }
++  else 
++  {
++    if (cur->ptr_to_child_list_struct != NULL)
++    {
++      sema_up (&cur->ptr_to_child_list_struct->sema_load);
++    }
++  }
+ 
+   /* Start the user process by simulating a return from an
+      interrupt, implemented by intr_exit (in
+@@ -86,9 +155,30 @@ start_process (void *file_name_)
+    This function will be implemented in problem 2-2.  For now, it
+    does nothing. */
+ int
+-process_wait (tid_t child_tid UNUSED) 
++process_wait (tid_t child_tid) 
+ {
++  struct thread *cur = thread_current ();
++  
++  if (list_empty (&cur->child_list))
++    return -1;
++  struct list_elem *e;
++  struct child_struct *child_o = NULL;
++  for (e = list_begin (&cur->child_list); e != list_end (&cur->child_list); 
++      e = list_next (e))
++  {
++    child_o = list_entry (e, struct child_struct, childelem);
++    if (child_o->tid == child_tid)
++    {
++      list_remove (&child_o->childelem);
++      break;  
++    }
++  }
++  if (child_o == NULL)
+   return -1;
++  sema_down (&child_o->sema_wait);
++  int status = child_o->status;
++  
++  return status;
+ }
+ 
+ /* Free the current process's resources. */
+@@ -98,6 +188,12 @@ process_exit (void)
+   struct thread *cur = thread_current ();
+   uint32_t *pd;
+ 
++  sema_up (&cur->ptr_to_child_list_struct->sema_wait);
++	// sema_up (&cur->ptr_to_child_list_struct->sema_load);
++
++  if (cur->file_currently_using != NULL)
++    file_allow_write (cur->file_currently_using);
++  
+   /* Destroy the current process's page directory and switch back
+      to the kernel-only page directory. */
+   pd = cur->pagedir;
+@@ -195,12 +291,42 @@ struct Elf32_Phdr
+ #define PF_W 2          /* Writable. */
+ #define PF_R 4          /* Readable. */
+ 
+-static bool setup_stack (void **esp);
++static bool setup_stack (void **esp, char *file_name, int word_count);
+ static bool validate_segment (const struct Elf32_Phdr *, struct file *);
+ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
+                           uint32_t read_bytes, uint32_t zero_bytes,
+                           bool writable);
+ 
++void reverse(char* begin, char* end); 
++  
++void reverse_words(char* s) 
++{ 
++    char* word_begin = s; 
++    char* temp = s; 
++  
++    while (*temp) { 
++        temp++; 
++        if (*temp == '\0') { 
++            reverse(word_begin, temp - 1); 
++        } 
++        else if (*temp == ' ') { 
++            reverse(word_begin, temp - 1); 
++            word_begin = temp + 1; 
++        } 
++    } 
++  reverse(s, temp - 1); 
++} 
++  
++void reverse(char* begin, char* end) 
++{ 
++    char temp; 
++    while (begin < end) { 
++        temp = *begin; 
++        *begin++ = *end; 
++        *end-- = temp; 
++    } 
++} 
++
+ /* Loads an ELF executable from FILE_NAME into the current thread.
+    Stores the executable's entry point into *EIP
+    and its initial stack pointer into *ESP.
+@@ -222,13 +348,26 @@ load (const char *file_name, void (**eip
+   process_activate ();
+ 
+   /* Open executable file. */
+-  file = filesys_open (file_name);
++  char *file_name_copy = (char *) malloc (strlen (file_name) + 1);
++  strlcpy (file_name_copy, file_name, PGSIZE);
++  reverse_words (file_name_copy);
++  char *token, *save_ptr;
++  
++  int word_count = 0;
++  for (token = strtok_r (file_name, " ", &save_ptr); token != NULL;
++             token = strtok_r (NULL, " ", &save_ptr))
++  {
++    if (word_count == 0)
++      file = filesys_open (token);
++    word_count += 1;
++  }
+   if (file == NULL) 
+     {
+       printf ("load: %s: open failed\n", file_name);
+       goto done; 
+     }
+-
++  thread_current ()->file_currently_using = file;
++  file_deny_write (file);
+   /* Read and verify executable header. */
+   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
+       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
+@@ -302,7 +441,7 @@ load (const char *file_name, void (**eip
+     }
+ 
+   /* Set up stack. */
+-  if (!setup_stack (esp))
++  if (!setup_stack (esp, file_name_copy, word_count))
+     goto done;
+ 
+   /* Start address. */
+@@ -312,7 +451,6 @@ load (const char *file_name, void (**eip
+ 
+  done:
+   /* We arrive here whether the load is successful or not. */
+-  file_close (file);
+   return success;
+ }
+ 
+@@ -426,18 +564,82 @@ load_segment (struct file *file, off_t o
+ 
+ /* Create a minimal stack by mapping a zeroed page at the top of
+    user virtual memory. */
++//pass arguments and setup the stack according to the arguments
+ static bool
+-setup_stack (void **esp) 
++setup_stack (void **esp, char *file_name, int word_count) 
+ {
+   uint8_t *kpage;
+   bool success = false;
+ 
++  
+   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
+   if (kpage != NULL) 
+     {
++      int *ar[word_count];
++      int cnt = 0, sum = 0;
++      char *token, *save_ptr;
++
+       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
+       if (success)
++      {
+         *esp = PHYS_BASE;
++        for (token = strtok_r (file_name, " ", &save_ptr); token != NULL;
++             token = strtok_r (NULL, " ", &save_ptr))
++        {
++            int size = strlen(token) + 1;
++            sum += size;
++            *esp = PHYS_BASE - sum;
++            ar[cnt] = *esp;
++            cnt += 1;
++            memcpy (*esp, token, size);
++        }
++        //align words in multiple of 4
++        int word_align = 0;
++        if (sum%4 != 0)
++        {
++          word_align = sum%4;
++        }
++        
++        char char_data = 0;
++        for (int i = 0; i < word_align; i++)
++        {
++          sum += 1;
++          *esp = PHYS_BASE - sum;
++          memcpy (*esp, &char_data, 1);
++        }
++        //add null pointer for argv[argc]
++        sum += 4;
++        *esp = PHYS_BASE - sum;
++        memcpy (*esp, &char_data, 1);
++        memcpy (*esp+1, &char_data, 1);
++        memcpy (*esp+2, &char_data, 1);
++        memcpy (*esp+3, &char_data, 1);
++        
++        //add address of values
++        int addr_sum = 0;
++        for (int i = 0; i < cnt; i++)
++        {
++          sum += 4;
++          *esp = PHYS_BASE - sum;
++          memcpy (*esp, &ar[i], 4);
++        }
++        
++        //add the address from where value's address starts
++        ar[cnt] = *esp;
++        sum += 4;
++        *esp = PHYS_BASE - sum;
++        memcpy (*esp, &ar[cnt], 4);
++        
++        //add argc
++        sum += 4;
++        *esp = PHYS_BASE - sum;
++        memcpy (*esp, &cnt, 4);
++        
++        //add return address. this is the final esp
++        sum += 4;
++        *esp = PHYS_BASE - sum;
++        memcpy (*esp, &char_data, 4);
++      }
+       else
+         palloc_free_page (kpage);
+     }
+diff -uprb Downloads/pintos/src/userprog/syscall.c pintos-assign/src/userprog/syscall.c
+--- Downloads/pintos/src/userprog/syscall.c	2012-09-27 06:08:38.000000000 +0530
++++ pintos-assign/src/userprog/syscall.c	2019-03-01 12:18:57.600000000 +0530
+@@ -3,18 +3,337 @@
+ #include <syscall-nr.h>
+ #include "threads/interrupt.h"
+ #include "threads/thread.h"
++#include "devices/shutdown.h"
++#include "threads/vaddr.h"
++#include "threads/malloc.h"
++#include "filesys/filesys.h"
++#include "filesys/file.h"
++#include "threads/synch.h"
++#include "userprog/process.h"
++#include <list.h>
+ 
+ static void syscall_handler (struct intr_frame *);
++struct file *get_file (int fd);
++
++bool
++validate_address (int *esp, int count)
++{
++  for (int i = 1; i <= count; i++)
++  {
++      if ( !is_user_vaddr (esp + i) )
++        return false;
++  }
++  return true;
++}
++
+ 
+ void
+ syscall_init (void) 
+ {
+   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
++  lock_init (&file_lock);
+ }
+ 
+ static void
+-syscall_handler (struct intr_frame *f UNUSED) 
++syscall_handler (struct intr_frame *f) 
+ {
+-  printf ("system call!\n");
++  int *esp = f->esp;
++  f->eax = INT32_MIN;
++  
++  if (*esp == SYS_HALT)
++  {
++    halt ();
++  }
++  else if (*esp == SYS_EXIT)
++  {
++    if (validate_address (esp, 1))
++      exit (*(esp + 1));
++  }
++  else if (*esp == SYS_EXEC)
++  {
++    if (validate_address (esp, 1))
++      f->eax = exec (*(esp + 1));
++  }
++  else if (*esp == SYS_WAIT)
++  {
++    if (validate_address (esp, 1))
++      f->eax = wait (*(esp + 1));
++  }
++  else if (*esp == SYS_CREATE)
++  {
++    if (validate_address (esp, 2))
++      f->eax = create (*(esp + 1), *(esp + 2));  
++  }
++  else if (*esp == SYS_REMOVE)
++  {
++    if (validate_address (esp, 1))
++      f->eax = remove (*(esp + 1));
++  }
++  else if (*esp == SYS_OPEN)
++  {
++    if (validate_address (esp, 1))
++      f->eax = open (*(esp + 1));
++  }
++  else if (*esp == SYS_FILESIZE)
++  {
++    if (validate_address (esp, 1))
++      f->eax = filesize (*(esp + 1));
++  }
++  else if (*esp == SYS_READ)
++  {
++    if (validate_address (esp, 3))
++      f->eax = read ( *(esp + 1), *(esp + 2), *(esp + 3));
++  }
++  else if (*esp == SYS_WRITE)
++  {
++    if (validate_address (esp, 3))
++      f->eax = write ( *(esp + 1), *(esp + 2), *(esp + 3));
++  }
++  else if (*esp == SYS_SEEK)
++  {
++    if (validate_address (esp, 2))
++    {
++      seek ( *(esp + 1), *(esp + 2) );
++      f->eax = 0;
++    }
++  }
++  else if (*esp == SYS_TELL)
++  {
++    if (validate_address (esp, 1))
++      f->eax = tell (*(esp + 1));
++  }
++  else if (*esp == SYS_CLOSE)
++  {
++    if (validate_address (esp, 1))
++    {
++      close (*(esp + 1));
++      f->eax = 0;  
++    }
++  }
++  else 
++    exit (-1);
++
++  if (f->eax == INT32_MIN)
++    exit (-1);
++}
++
++void 
++halt (void)
++{
++  shutdown_power_off ();
++}
++
++void 
++exit (int status)
++{
++  struct thread *cur = thread_current ();
++  if (cur->ptr_to_child_list_struct != NULL)
++    cur->ptr_to_child_list_struct->status = status;
++  
++  if (lock_held_by_current_thread (&file_lock))
++    lock_release (&file_lock);
++  
++  //close all fd
++  while (!list_empty (&cur->file_list))
++	{
++		struct list_elem *e = list_begin (&cur->file_list);
++		close (list_entry (e, struct file_struct, fileelem)->fd);
++	}
++
++  printf("%s: exit(%d)\n", thread_current ()->name, status);
+   thread_exit ();
+ }
++
++pid_t 
++exec (const char *cmd_line)
++{
++	lock_acquire (&file_lock);
++	pid_t tid = process_execute (cmd_line);
++	lock_release (&file_lock);
++	return tid;
++}
++
++int 
++wait (pid_t pid)
++{
++  return process_wait (pid);
++}
++
++bool 
++create (const char *file, unsigned initial_size)
++{
++  if (file == NULL)
++    exit (-1);
++  
++  lock_acquire (&file_lock);
++  bool success = filesys_create (file, initial_size);
++  lock_release (&file_lock);
++  return success;
++}
++
++bool 
++remove (const char *file)
++{
++  if (file == NULL)
++    exit (-1);
++  
++  lock_acquire (&file_lock);
++  bool success = filesys_remove (file);
++  lock_release (&file_lock);
++  return success;
++}
++
++int 
++open (const char *file)
++{
++  if (file == NULL)
++    exit (-1);
++  lock_acquire (&file_lock);
++  struct file *file_o = filesys_open (file);
++  lock_release (&file_lock);
++  
++  if (file_o == NULL)
++    return (-1);
++  
++  struct thread *cur = thread_current ();
++  struct file_struct *f_struct = (struct file_struct *) malloc (sizeof (struct file_struct));
++  lock_acquire (&file_lock);
++  f_struct->fd = allocate_fd++;
++  f_struct->file = file_o;
++  list_push_back (&cur->file_list, &f_struct->fileelem);
++  lock_release (&file_lock);
++  
++  return f_struct->fd;
++}
++
++int 
++filesize (int fd)
++{
++  struct file *file_o = get_file (fd);
++  if (file_o == NULL)
++    return (-1);
++  
++  lock_acquire (&file_lock);
++  int32_t size = file_length (file_o);
++  lock_release (&file_lock);
++
++  return size;
++}
++
++int 
++read (int fd, void *buffer, unsigned size)
++{
++  if ( !is_user_vaddr(buffer + size))
++    exit (-1);
++  //read from stdin
++  if (fd == 0)
++  {
++    for (int i = 0; i < size; i++)
++    {
++      *(char *)(buffer + i) = input_getc();
++    }
++    return size;
++  }
++  //read from file
++  else 
++  {
++    struct file *file_o = get_file (fd);
++    if (file_o == NULL)
++      return (-1);
++    
++    lock_acquire (&file_lock);
++    int ret_size = file_read (file_o, buffer, size);
++    lock_release (&file_lock);
++    return ret_size;
++  }
++}
++
++int 
++write (int fd, const void *buffer, unsigned size)
++{
++  if (!is_user_vaddr (buffer + size))
++    exit (-1);
++  //write to stdout
++  if (fd == 1)
++  {
++    // hex_dump (0,buffer, size, true);
++    putbuf (buffer, size);
++    return size;
++  }
++  //write to file
++  else
++  {
++    // printf ("inside else and thread name is %s, %d\n", thread_name (), thread_current ());
++    struct file *file_o = get_file (fd);
++    if (file_o == NULL)
++      return (-1);
++    
++    lock_acquire (&file_lock);
++    int ret_size = file_write (file_o, buffer, size);
++    lock_release (&file_lock);
++    return ret_size;
++   }
++}
++
++void 
++seek (int fd, unsigned position)
++{
++  struct file *file_o = get_file (fd);
++  if (file_o == NULL)
++    return (-1);
++  
++  lock_acquire (&file_lock);
++  file_seek (file_o, position);
++  lock_release (&file_lock);
++}
++
++unsigned 
++tell (int fd)
++{
++  struct file *file_o = get_file (fd);
++  if (file_o == NULL)
++    return (-1);
++  
++  lock_acquire (&file_lock);
++  int pos = file_tell(file_o);
++  lock_release (&file_lock);
++  return pos;
++}
++
++void 
++close (int fd)
++{
++  
++  struct thread *cur = thread_current ();
++  struct list_elem *e;
++  for (e = list_begin (&cur->file_list); e != list_end (&cur->file_list); 
++      e = list_next (e))
++  {
++    struct file_struct *file_o = list_entry (e, struct file_struct, fileelem);
++    if (file_o->fd == fd)
++    {
++      lock_acquire (&file_lock);
++      file_close (file_o->file);
++      list_remove (&file_o->fileelem);
++      free (file_o);
++      lock_release (&file_lock);
++      break;
++    }
++  }
++}
++
++struct file *
++get_file (int fd)
++{
++  struct thread *cur = thread_current ();
++  struct list_elem *e;
++
++  for (e = list_begin (&cur->file_list); e != list_end (&cur->file_list); 
++      e = list_next (e))
++	{
++		struct file_struct *file_o = list_entry (e, struct file_struct, fileelem);
++		if (file_o->fd == fd)
++			return file_o->file;
++	}
++  return NULL;
++}
+\ No newline at end of file
+diff -uprb Downloads/pintos/src/userprog/syscall.h pintos-assign/src/userprog/syscall.h
+--- Downloads/pintos/src/userprog/syscall.h	2012-09-27 06:08:38.000000000 +0530
++++ pintos-assign/src/userprog/syscall.h	2019-03-01 12:19:00.580000000 +0530
+@@ -1,6 +1,24 @@
+ #ifndef USERPROG_SYSCALL_H
+ #define USERPROG_SYSCALL_H
++#include <stdbool.h>
++#include <debug.h>
+ 
++typedef int pid_t;
+ void syscall_init (void);
++struct lock file_lock;
++static int allocate_fd = 2;
+ 
++void halt (void) NO_RETURN;
++void exit (int status) NO_RETURN;
++pid_t exec (const char *file);
++int wait (pid_t);
++bool create (const char *file, unsigned initial_size);
++bool remove (const char *file);
++int open (const char *file);
++int filesize (int fd);
++int read (int fd, void *buffer, unsigned length);
++int write (int fd, const void *buffer, unsigned length);
++void seek (int fd, unsigned position);
++unsigned tell (int fd);
++void close (int fd);
+ #endif /* userprog/syscall.h */
+diff -uprb Downloads/pintos/src/utils/Makefile pintos-assign/src/utils/Makefile
+--- Downloads/pintos/src/utils/Makefile	2012-09-27 06:08:38.000000000 +0530
++++ pintos-assign/src/utils/Makefile	2019-02-06 23:12:29.060000000 +0530
+@@ -2,7 +2,7 @@ all: setitimer-helper squish-pty squish-
+ 
+ CC = gcc
+ CFLAGS = -Wall -W
+-LDFLAGS = -lm
++LDLIBS = -lm
+ setitimer-helper: setitimer-helper.o
+ squish-pty: squish-pty.o
+ squish-unix: squish-unix.o
+diff -uprb Downloads/pintos/src/utils/pintos pintos-assign/src/utils/pintos
+--- Downloads/pintos/src/utils/pintos	2012-09-27 06:08:38.000000000 +0530
++++ pintos-assign/src/utils/pintos	2019-02-06 23:15:14.436000000 +0530
+@@ -100,7 +100,7 @@ sub parse_command_line {
+ 	  or exit 1;
+     }
+ 
+-    $sim = "bochs" if !defined $sim;
++    $sim = "qemu" if !defined $sim;
+     $debug = "none" if !defined $debug;
+     $vga = exists ($ENV{DISPLAY}) ? "window" : "none" if !defined $vga;
+ 
+@@ -620,7 +620,7 @@ sub run_qemu {
+       if $vga eq 'terminal';
+     print "warning: qemu doesn't support jitter\n"
+       if defined $jitter;
+-    my (@cmd) = ('qemu');
++    my (@cmd) = ('qemu-system-i386');
+     push (@cmd, '-hda', $disks[0]) if defined $disks[0];
+     push (@cmd, '-hdb', $disks[1]) if defined $disks[1];
+     push (@cmd, '-hdc', $disks[2]) if defined $disks[2];
+Only in pintos-assign/src: .vscode
